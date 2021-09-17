@@ -1,6 +1,8 @@
 import requests  # for getting URL
 import pandas as pd
 import datetime as dt
+from typing import Match
+import re
 
 class whoopUser:
 
@@ -10,7 +12,7 @@ class whoopUser:
         self.login(email, password)
         self.header = {'Authorization': 'bearer {}'.format(self.token)}
         self.CYCLES_URL = 'users/{}/cycles'.format(self.user_id)
-        self.HEART_RATE_URL = self.BASE_URL + "users/{0}/metrics/heart_rate".format(self.user_id)
+        self.HEART_RATE_URL = self.BASE_URL + f"users/{self.user_id}/metrics/heart_rate"
 
     def login(self, email, password):
         """
@@ -101,9 +103,12 @@ class whoopUser:
         :param params: start/end data
         :return: dataframe with sleep data, linked to cycles IDs
         """
-        df_cols = ['cycle_id', 'sleep_id', 'cycles_count', 'disturbance_count', 'time_lower_bound', 'time_upper_bound',
-                   'in_bed_duration', 'is_nap', 'latency_duration', 'light_sleep_duration', 'no_data_duration',
-                   'quality_duration', 'rem_sleep_duration', 'respiratory_rate', 'sleep_score', 'sleep_consistency',
+        df_cols = ['cycle_id', 'sleep_id', 'cycles_count', 'disturbance_count',
+                   'time_lower_bound', 'time_upper_bound',
+                   'in_bed_duration', 'is_nap', 'latency_duration',
+                   'light_sleep_duration', 'no_data_duration',
+                   'quality_duration', 'rem_sleep_duration',
+                   'respiratory_rate', 'sleep_score', 'sleep_consistency',
                    'sleep_efficiency', 'sws_duration', 'wake_duration']
         result_df = pd.DataFrame(columns=df_cols)
         cycles_data = self.get_cycles_json(params)
@@ -120,8 +125,16 @@ class whoopUser:
                 row_dict['sleep_id'] = sleep['id']
                 row_dict['cycles_count'] = sleep['cyclesCount']
                 row_dict['disturbance_count'] = sleep['disturbanceCount']
-                row_dict['time_upper_bound'] = sleep['during']['upper']
-                row_dict['time_lower_bound'] = sleep['during']['lower']
+                # for some reason whoop leaves all timezone substrings in the
+                # datetime string as +0000, and adds a timezone offset field
+                # to the response
+                tz_as_str = sleep["timezoneOffset"]
+                row_dict['time_upper_bound'] = whoopUser.convert_whoop_str_to_datetime(
+                    sleep['during']['upper'],
+                    tz_as_str)
+                row_dict['time_lower_bound'] = whoopUser.convert_whoop_str_to_datetime(
+                    sleep['during']['lower'],
+                    tz_as_str)
                 row_dict['is_nap'] = sleep['isNap']
                 row_dict['in_bed_duration'] = sleep['inBedDuration']
                 row_dict['light_sleep_duration'] = sleep['lightSleepDuration']
@@ -140,14 +153,18 @@ class whoopUser:
 
     def get_workouts_df(self, params=default_params):
         """
-        Will get all data related to workouts. Dataframe will link to cycle IDs
+        Will get all data related to workouts.
+
+        Dataframe will link to cycle IDs
         :param params: start end date
         :return: dataframe
         """
         cycles_data = self.get_cycles_json()
-        df_cols = ['cycle_id', 'workout_id', 'average_hr', 'cumulative_strain', 'time_upper_bound', 'time_lower_bound',
-                   'kilojoules', 'strain_score', 'sport_id', 'source', 'time_hr_zone_0',
-                   'time_hr_zone_1', 'time_hr_zone_2', 'time_hr_zone_3',
+        df_cols = ['cycle_id', 'workout_id', 'average_hr', 'cumulative_strain',
+                   'time_upper_bound', 'time_lower_bound',
+                   'kilojoules', 'strain_score', 'sport_id',
+                   'source', 'time_hr_zone_0', 'time_hr_zone_1',
+                   'time_hr_zone_2', 'time_hr_zone_3',
                    'time_hr_zone_4', 'time_hr_zone_5']
         result_df = pd.DataFrame(columns=df_cols)
         for day in cycles_data:
@@ -170,26 +187,35 @@ class whoopUser:
                 zones = workout['zones']
                 for i in range(0, 6):
                     row_dict['time_hr_zone_' + str(i)] = zones[i]
-                result_df  =result_df.append(row_dict, ignore_index=True)
+                result_df = result_df.append(row_dict, ignore_index=True)
         return result_df
+
+
     default_params_hr = {
         'start': '2020-12-10T00:00:00.000Z',
         'end': '2020-12-16T00:00:00.000Z'
     }
+
     def get_heart_rate_json(self, params=default_params_hr):
         """
         Get heart rate data on user
         :param params: params for heart rate data
         :return: dict of heart rate data
         """
-        hr_request = requests.get(self.HEART_RATE_URL, params=params, headers=self.header)
+        hr_request = requests.get(self.HEART_RATE_URL,
+                                  params=params,
+                                  headers=self.header)
         data = hr_request.json()
         return data
 
     def get_heart_rate_df(self, params=default_params_hr):
         """
-        Get heart rate data as a dataframe. Note the maximum range is 8 days. Converts thirteen digit UNIX timestamp to
-        normal time. Can take a very long time to run depending on how many days are specified. Maybe optimize later
+        Get heart rate data as a dataframe. Note the maximum range is 8 days.
+
+        Converts thirteen digit UNIX timestamp to
+        normal time.
+        Can take a very long time to run depending on how many days are specified.
+        Maybe optimize later
         :param params: start end range
         :return:dataframe with heart rate data over time
         """
@@ -203,19 +229,39 @@ class whoopUser:
             result_df = result_df.append(row_dict, ignore_index=True)
         return result_df
 
-
     @staticmethod
     def convert_unix_time_to_current(timestamp):
-        #will use local timezone for moment
+        """blah."""
+        # will use local timezone for moment
         time = dt.datetime.fromtimestamp(int(timestamp)/1000)
         return time.strftime("%Y-%m-%d %H:%M:%S")
 
+    @staticmethod
+    def convert_whoop_str_to_datetime(whoop_dt: str, tz: str) -> dt.datetime:
+        """
+        Make proper datetimes out of this.
+
+        sometimes microseconds are given with 2 digits, not 3
+        pad with zero if necessary
+        """
+        def zero_pad_microseconds(mseconds: Match) -> str:
+            return f".{mseconds.group(1).ljust(3, '0')}+"
+
+        adjusted_str = re.sub(r"\.([0-9]{0,3})\+",
+                              zero_pad_microseconds,
+                              whoop_dt)
+
+        def correct_tz(tz_match: Match) -> str:
+            return f"{tz[:3]}:{tz[3:]}"
+
+        final_str = re.sub(r"([\+|\-][0-9]{2}:[0-9]{2})",
+                           correct_tz,
+                           adjusted_str)
+
+        return dt.datetime.fromisoformat(final_str)
+
     def get_sports(self):
-        """
-        :return: List of sports and releveant information
-        """
+        """:return: List of sports and releveant information."""
         sports_url = self.BASE_URL + "sports"
         sports_request = requests.get(sports_url, headers=self.header)
         return sports_request.json()
-
-
